@@ -1,0 +1,46 @@
+name: Daily Liquidity Report
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # Every day at 08:00 UTC — adjust as needed
+  workflow_dispatch:       # Allows manual trigger from GitHub UI for testing
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install psycopg2-binary requests
+
+      - run: python report.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+```
+
+---
+
+### Step 3: Add your secrets in GitHub
+
+Go to your repo → **Settings → Secrets and variables → Actions → New repository secret** and add:
+
+| Secret | Value |
+|---|---|
+| `DATABASE_URL` | `postgresql://user:pass@host:5432/dbname` |
+| `TELEGRAM_BOT_TOKEN` | your bot token from BotFather |
+| `TELEGRAM_CHAT_ID` | your chat/group ID |
+
+---
+
+That's it. The workflow runs daily at 08:00 UTC, and you can hit **"Run workflow"** manually any time to test it. The message will look like:
+```
+📊 Daily Liquidity Report — Albert Blanc
+
+✅ 1H:  78.50% success (63/80 pairs ≥60%)
+❌ 12H: 55.00% success (44/80 pairs ≥60%)
