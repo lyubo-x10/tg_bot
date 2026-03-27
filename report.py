@@ -168,7 +168,7 @@ def main():
         ex_data = fetch_exchange_data(token, period)
         p_data = fetch_partner_data(token, hours)
         rate, passing, total = compute_success_rate(p_data, ex_data)
-        emoji = '✅' if rate >= 60 else '❌'
+        emoji = '✅' if rate >= 80 else '❌'
         lines.append(f'{emoji} *{label}*: `{rate}%` success ({passing}/{total} pairs ≥60%)')
 
     send_telegram('\n'.join(lines))
