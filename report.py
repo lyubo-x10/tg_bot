@@ -1,10 +1,12 @@
 import os
-import psycopg2
 import requests
 
-DB_URL = os.environ["DATABASE_URL"]
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+METABASE_URL = 'https://x10.metabaseapp.com'
+METABASE_USERNAME = os.environ['METABASE_USERNAME']
+METABASE_PASSWORD = os.environ['METABASE_PASSWORD']
+DATABASE_ID = 100  # SN - Trades (has exchange_liquidity_stats & partner_liquidity_stats)
+BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
+CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
 QUERY = """
 WITH
@@ -122,27 +124,46 @@ FROM unpivoted_12h
 ORDER BY period;
 """
 
+def get_metabase_token():
+    res = requests.post(
+        f'{METABASE_URL}/api/session',
+        json={'username': METABASE_USERNAME, 'password': METABASE_PASSWORD}
+    )
+    if res.status_code != 200:
+        raise Exception(f'Metabase login failed: {res.status_code} {res.text}')
+    return res.json()['id']
+
+def run_query(token):
+    res = requests.post(
+        f'{METABASE_URL}/api/dataset',
+        headers={'X-Metabase-Session': token, 'Content-Type': 'application/json'},
+        json={
+            'database': DATABASE_ID,
+            'type': 'native',
+            'native': {'query': QUERY}
+        }
+    )
+    if res.status_code != 202:
+        raise Exception(f'Query failed: {res.status_code} {res.text[:500]}')
+    data = res.json()
+    rows = data['data']['rows']
+    return rows
+
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
+    url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
+    requests.post(url, json={'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'Markdown'})
 
 def main():
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
-    cur.execute(QUERY)
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    token = get_metabase_token()
+    rows = run_query(token)
 
-    lines = ["📊 *Daily Liquidity Report — Albert Blanc*\n"]
+    lines = ['📊 *Daily Liquidity Report — Albert Blanc*\n']
     for period, success_rate, passing, total in rows:
-        emoji = "✅" if success_rate >= 60 else "❌"
-        lines.append(
-            f"{emoji} *{period}*: `{success_rate}%` success "
-            f"({passing}/{total} pairs ≥60%)"
-        )
+        success_rate = float(success_rate)
+        emoji = '✅' if success_rate >= 60 else '❌'
+        lines.append(f'{emoji} *{period}*: `{success_rate}%` success ({passing}/{total} pairs ≥60%)')
 
-    send_telegram("\n".join(lines))
+    send_telegram('\n'.join(lines))
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
