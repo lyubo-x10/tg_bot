@@ -15,10 +15,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - run: pip install psycopg2-binary requests
+      - run: pip install requests
 
       - run: python report.py
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          METABASE_USERNAME: ${{ secrets.METABASE_USERNAME }}
+          METABASE_PASSWORD: ${{ secrets.METABASE_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
