@@ -1,128 +1,40 @@
 import os
 import requests
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 
 METABASE_URL = 'https://x10.metabaseapp.com'
 METABASE_USERNAME = os.environ['METABASE_USERNAME']
 METABASE_PASSWORD = os.environ['METABASE_PASSWORD']
-DATABASE_ID = 100  # SN - Trades (has exchange_liquidity_stats & partner_liquidity_stats)
 BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
-QUERY = """
-WITH
-ex_1h AS (
-  SELECT market,
-    MAX(ask_avg_liquidity_0_0001) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS ask_sum_0_0001,
-    MAX(ask_avg_liquidity_0_0003) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS ask_sum_0_0003,
-    MAX(ask_avg_liquidity_0_0015) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS ask_sum_0_0015,
-    MAX(ask_avg_liquidity_0_0030) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS ask_sum_0_0030,
-    MAX(bid_avg_liquidity_0_0001) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS bid_sum_0_0001,
-    MAX(bid_avg_liquidity_0_0003) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS bid_sum_0_0003,
-    MAX(bid_avg_liquidity_0_0015) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS bid_sum_0_0015,
-    MAX(bid_avg_liquidity_0_0030) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS bid_sum_0_0030
-  FROM stats.exchange_liquidity_stats
-  WHERE period = '1H' AND exchange_name IN ('BINANCE','HYPERLIQUID')
-  GROUP BY market
-),
-ex_12h AS (
-  SELECT market,
-    MAX(ask_avg_liquidity_0_0001) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS ask_sum_0_0001,
-    MAX(ask_avg_liquidity_0_0003) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS ask_sum_0_0003,
-    MAX(ask_avg_liquidity_0_0015) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS ask_sum_0_0015,
-    MAX(ask_avg_liquidity_0_0030) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS ask_sum_0_0030,
-    MAX(bid_avg_liquidity_0_0001) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS bid_sum_0_0001,
-    MAX(bid_avg_liquidity_0_0003) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS bid_sum_0_0003,
-    MAX(bid_avg_liquidity_0_0015) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS bid_sum_0_0015,
-    MAX(bid_avg_liquidity_0_0030) FILTER (WHERE exchange_name IN ('BINANCE','HYPERLIQUID')) AS bid_sum_0_0030
-  FROM stats.exchange_liquidity_stats
-  WHERE period = '12H' AND exchange_name IN ('BINANCE','HYPERLIQUID')
-  GROUP BY market
-),
-partner_1h AS (
-  SELECT market,
-    AVG(ask_liquidity) FILTER (WHERE spread = 0.0001) AS p_ask_0_0001,
-    AVG(ask_liquidity) FILTER (WHERE spread = 0.0003) AS p_ask_0_0003,
-    AVG(ask_liquidity) FILTER (WHERE spread = 0.0015) AS p_ask_0_0015,
-    AVG(ask_liquidity) FILTER (WHERE spread = 0.0030) AS p_ask_0_0030,
-    AVG(bid_liquidity) FILTER (WHERE spread = 0.0001) AS p_bid_0_0001,
-    AVG(bid_liquidity) FILTER (WHERE spread = 0.0003) AS p_bid_0_0003,
-    AVG(bid_liquidity) FILTER (WHERE spread = 0.0015) AS p_bid_0_0015,
-    AVG(bid_liquidity) FILTER (WHERE spread = 0.0030) AS p_bid_0_0030
-  FROM partner_liquidity_stats
-  WHERE partner = 'Albert Blanc' AND "timestamp" >= now() - interval '1 hour'
-  GROUP BY market
-),
-partner_12h AS (
-  SELECT market,
-    AVG(ask_liquidity) FILTER (WHERE spread = 0.0001) AS p_ask_0_0001,
-    AVG(ask_liquidity) FILTER (WHERE spread = 0.0003) AS p_ask_0_0003,
-    AVG(ask_liquidity) FILTER (WHERE spread = 0.0015) AS p_ask_0_0015,
-    AVG(ask_liquidity) FILTER (WHERE spread = 0.0030) AS p_ask_0_0030,
-    AVG(bid_liquidity) FILTER (WHERE spread = 0.0001) AS p_bid_0_0001,
-    AVG(bid_liquidity) FILTER (WHERE spread = 0.0003) AS p_bid_0_0003,
-    AVG(bid_liquidity) FILTER (WHERE spread = 0.0015) AS p_bid_0_0015,
-    AVG(bid_liquidity) FILTER (WHERE spread = 0.0030) AS p_bid_0_0030
-  FROM partner_liquidity_stats
-  WHERE partner = 'Albert Blanc' AND "timestamp" >= now() - interval '12 hours'
-  GROUP BY market
-),
-per_market_1h AS (
-  SELECT p.market,
-    COALESCE(ROUND(100 * p.p_ask_0_0001 / NULLIF(e.ask_sum_0_0001, 0), 2), 100) AS ask_0_0001,
-    COALESCE(ROUND(100 * p.p_bid_0_0001 / NULLIF(e.bid_sum_0_0001, 0), 2), 100) AS bid_0_0001,
-    COALESCE(ROUND(100 * p.p_ask_0_0003 / NULLIF(e.ask_sum_0_0003, 0), 2), 100) AS ask_0_0003,
-    COALESCE(ROUND(100 * p.p_bid_0_0003 / NULLIF(e.bid_sum_0_0003, 0), 2), 100) AS bid_0_0003,
-    COALESCE(ROUND(100 * p.p_ask_0_0015 / NULLIF(e.ask_sum_0_0015, 0), 2), 100) AS ask_0_0015,
-    COALESCE(ROUND(100 * p.p_bid_0_0015 / NULLIF(e.bid_sum_0_0015, 0), 2), 100) AS bid_0_0015,
-    COALESCE(ROUND(100 * p.p_ask_0_0030 / NULLIF(e.ask_sum_0_0030, 0), 2), 100) AS ask_0_003,
-    COALESCE(ROUND(100 * p.p_bid_0_0030 / NULLIF(e.bid_sum_0_0030, 0), 2), 100) AS bid_0_003
-  FROM partner_1h p JOIN ex_1h e ON e.market = p.market
-),
-per_market_12h AS (
-  SELECT p.market,
-    COALESCE(ROUND(100 * p.p_ask_0_0001 / NULLIF(e.ask_sum_0_0001, 0), 2), 100) AS ask_0_0001,
-    COALESCE(ROUND(100 * p.p_bid_0_0001 / NULLIF(e.bid_sum_0_0001, 0), 2), 100) AS bid_0_0001,
-    COALESCE(ROUND(100 * p.p_ask_0_0003 / NULLIF(e.ask_sum_0_0003, 0), 2), 100) AS ask_0_0003,
-    COALESCE(ROUND(100 * p.p_bid_0_0003 / NULLIF(e.bid_sum_0_0003, 0), 2), 100) AS bid_0_0003,
-    COALESCE(ROUND(100 * p.p_ask_0_0015 / NULLIF(e.ask_sum_0_0015, 0), 2), 100) AS ask_0_0015,
-    COALESCE(ROUND(100 * p.p_bid_0_0015 / NULLIF(e.bid_sum_0_0015, 0), 2), 100) AS bid_0_0015,
-    COALESCE(ROUND(100 * p.p_ask_0_0030 / NULLIF(e.ask_sum_0_0030, 0), 2), 100) AS ask_0_003,
-    COALESCE(ROUND(100 * p.p_bid_0_0030 / NULLIF(e.bid_sum_0_0030, 0), 2), 100) AS bid_0_003
-  FROM partner_12h p JOIN ex_12h e ON e.market = p.market
-),
-unpivoted_1h AS (
-  SELECT market, ask_0_0001 AS pct FROM per_market_1h UNION ALL
-  SELECT market, bid_0_0001 FROM per_market_1h UNION ALL
-  SELECT market, ask_0_0003 FROM per_market_1h UNION ALL
-  SELECT market, bid_0_0003 FROM per_market_1h UNION ALL
-  SELECT market, ask_0_0015 FROM per_market_1h UNION ALL
-  SELECT market, bid_0_0015 FROM per_market_1h UNION ALL
-  SELECT market, ask_0_003  FROM per_market_1h UNION ALL
-  SELECT market, bid_0_003  FROM per_market_1h
-),
-unpivoted_12h AS (
-  SELECT market, ask_0_0001 AS pct FROM per_market_12h UNION ALL
-  SELECT market, bid_0_0001 FROM per_market_12h UNION ALL
-  SELECT market, ask_0_0003 FROM per_market_12h UNION ALL
-  SELECT market, bid_0_0003 FROM per_market_12h UNION ALL
-  SELECT market, ask_0_0015 FROM per_market_12h UNION ALL
-  SELECT market, bid_0_0015 FROM per_market_12h UNION ALL
-  SELECT market, ask_0_003  FROM per_market_12h UNION ALL
-  SELECT market, bid_0_003  FROM per_market_12h
-)
-SELECT '1H' AS period,
-  ROUND(100.0 * COUNT(*) FILTER (WHERE pct >= 60) / NULLIF(COUNT(*), 0), 2) AS success_rate_pct,
-  COUNT(*) FILTER (WHERE pct >= 60) AS passing_count,
-  COUNT(*) AS total_count
-FROM unpivoted_1h
-UNION ALL
-SELECT '12H',
-  ROUND(100.0 * COUNT(*) FILTER (WHERE pct >= 60) / NULLIF(COUNT(*), 0), 2),
-  COUNT(*) FILTER (WHERE pct >= 60),
-  COUNT(*)
-FROM unpivoted_12h
-ORDER BY period;
-"""
+DATABASE_ID = 100
+
+# Field IDs from metadata
+# partner_liquidity_stats (table 925)
+F_PARTNER    = 5219
+F_MARKET_P   = 5222
+F_SPREAD     = 5223
+F_ASK_LIQ   = 5220
+F_BID_LIQ   = 5224
+F_TIMESTAMP  = 5221
+
+# exchange_liquidity_stats (table 2575)
+F_PERIOD     = 9439
+F_EXCHANGE   = 9440
+F_MARKET_E   = 9441
+F_ASK_0001   = 9442
+F_ASK_0003   = 9443
+F_ASK_0015   = 9444
+F_ASK_0030   = 9445
+F_BID_0001   = 9446
+F_BID_0003   = 9447
+F_BID_0015   = 9448
+F_BID_0030   = 9449
+
+SPREADS = [0.0001, 0.0003, 0.0015, 0.0030]
+
 
 def get_metabase_token():
     res = requests.post(
@@ -133,37 +45,134 @@ def get_metabase_token():
         raise Exception(f'Metabase login failed: {res.status_code} {res.text}')
     return res.json()['id']
 
-def run_query(token):
+
+def mbql_query(token, table_id, filters, fields):
+    payload = {
+        'database': DATABASE_ID,
+        'type': 'query',
+        'query': {
+            'source-table': table_id,
+            'fields': [['field', f, None] for f in fields],
+            'filter': filters
+        }
+    }
     res = requests.post(
         f'{METABASE_URL}/api/dataset',
         headers={'X-Metabase-Session': token, 'Content-Type': 'application/json'},
-        json={
-            'database': DATABASE_ID,
-            'type': 'native',
-            'native': {'query': QUERY}
-        }
+        json=payload
     )
     if res.status_code != 202:
         raise Exception(f'Query failed: {res.status_code} {res.text[:500]}')
     data = res.json()
     rows = data['data']['rows']
-    return rows
+    cols = [c['name'] for c in data['data']['cols']]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def fetch_exchange_data(token, period):
+    rows = mbql_query(
+        token,
+        table_id=2575,
+        filters=['and',
+            ['=', ['field', F_PERIOD, None], period],
+            ['=', ['field', F_EXCHANGE, None], 'BINANCE', 'HYPERLIQUID']
+        ],
+        fields=[F_MARKET_E, F_EXCHANGE,
+                F_ASK_0001, F_ASK_0003, F_ASK_0015, F_ASK_0030,
+                F_BID_0001, F_BID_0003, F_BID_0015, F_BID_0030]
+    )
+    # For each market, take MAX across exchanges
+    result = defaultdict(lambda: {
+        'ask_0001': 0, 'ask_0003': 0, 'ask_0015': 0, 'ask_0030': 0,
+        'bid_0001': 0, 'bid_0003': 0, 'bid_0015': 0, 'bid_0030': 0
+    })
+    for r in rows:
+        m = r['market']
+        result[m]['ask_0001'] = max(result[m]['ask_0001'], float(r['ask_avg_liquidity_0_0001'] or 0))
+        result[m]['ask_0003'] = max(result[m]['ask_0003'], float(r['ask_avg_liquidity_0_0003'] or 0))
+        result[m]['ask_0015'] = max(result[m]['ask_0015'], float(r['ask_avg_liquidity_0_0015'] or 0))
+        result[m]['ask_0030'] = max(result[m]['ask_0030'], float(r['ask_avg_liquidity_0_0030'] or 0))
+        result[m]['bid_0001'] = max(result[m]['bid_0001'], float(r['bid_avg_liquidity_0_0001'] or 0))
+        result[m]['bid_0003'] = max(result[m]['bid_0003'], float(r['bid_avg_liquidity_0_0003'] or 0))
+        result[m]['bid_0015'] = max(result[m]['bid_0015'], float(r['bid_avg_liquidity_0_0015'] or 0))
+        result[m]['bid_0030'] = max(result[m]['bid_0030'], float(r['bid_avg_liquidity_0_0030'] or 0))
+    return result
+
+
+def fetch_partner_data(token, hours):
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
+    rows = mbql_query(
+        token,
+        table_id=925,
+        filters=['and',
+            ['=', ['field', F_PARTNER, None], 'Albert Blanc'],
+            ['>', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], cutoff]
+        ],
+        fields=[F_MARKET_P, F_SPREAD, F_ASK_LIQ, F_BID_LIQ]
+    )
+    # For each market+spread, compute AVG ask and bid
+    sums = defaultdict(lambda: defaultdict(lambda: {'ask_sum': 0, 'bid_sum': 0, 'count': 0}))
+    for r in rows:
+        m = r['market']
+        s = float(r['spread'])
+        sums[m][s]['ask_sum'] += float(r['ask_liquidity'] or 0)
+        sums[m][s]['bid_sum'] += float(r['bid_liquidity'] or 0)
+        sums[m][s]['count'] += 1
+    result = {}
+    for m, spreads in sums.items():
+        result[m] = {}
+        for s, v in spreads.items():
+            n = v['count'] or 1
+            result[m][s] = {'ask': v['ask_sum'] / n, 'bid': v['bid_sum'] / n}
+    return result
+
+
+def compute_success_rate(partner_data, exchange_data):
+    passing = 0
+    total = 0
+    spread_map = {
+        0.0001: ('ask_0001', 'bid_0001'),
+        0.0003: ('ask_0003', 'bid_0003'),
+        0.0015: ('ask_0015', 'bid_0015'),
+        0.0030: ('ask_0030', 'bid_0030'),
+    }
+    for market, spreads in partner_data.items():
+        if market not in exchange_data:
+            continue
+        ex = exchange_data[market]
+        for spread, vals in spreads.items():
+            ask_key, bid_key = spread_map.get(spread, (None, None))
+            if not ask_key:
+                continue
+            ex_ask = ex[ask_key]
+            ex_bid = ex[bid_key]
+            ask_pct = 100 if ex_ask == 0 else 100 * vals['ask'] / ex_ask
+            bid_pct = 100 if ex_bid == 0 else 100 * vals['bid'] / ex_bid
+            passing += (1 if ask_pct >= 60 else 0) + (1 if bid_pct >= 60 else 0)
+            total += 2
+    rate = round(100 * passing / total, 2) if total else 0
+    return rate, passing, total
+
 
 def send_telegram(message):
     url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
     requests.post(url, json={'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'Markdown'})
 
+
 def main():
     token = get_metabase_token()
-    rows = run_query(token)
 
     lines = ['📊 *Daily Liquidity Report — Albert Blanc*\n']
-    for period, success_rate, passing, total in rows:
-        success_rate = float(success_rate)
-        emoji = '✅' if success_rate >= 60 else '❌'
-        lines.append(f'{emoji} *{period}*: `{success_rate}%` success ({passing}/{total} pairs ≥60%)')
+
+    for label, period, hours in [('1H', '1H', 1), ('12H', '12H', 12)]:
+        ex_data = fetch_exchange_data(token, period)
+        p_data = fetch_partner_data(token, hours)
+        rate, passing, total = compute_success_rate(p_data, ex_data)
+        emoji = '✅' if rate >= 60 else '❌'
+        lines.append(f'{emoji} *{label}*: `{rate}%` success ({passing}/{total} pairs ≥60%)')
 
     send_telegram('\n'.join(lines))
+
 
 if __name__ == '__main__':
     main()
