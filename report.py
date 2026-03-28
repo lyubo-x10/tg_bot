@@ -30,9 +30,6 @@ F_BID_0003  = 9447
 F_BID_0015  = 9448
 F_BID_0030  = 9449
 
-BTC_ETH_MARKETS = {'BTC', 'ETH', 'BTCUSDT', 'ETHUSDT', 'BTC-USD', 'ETH-USD',
-                   'BTC/USD', 'ETH/USD', 'BTCUSD', 'ETHUSD'}
-
 SPREAD_MAP = {
     0.0001: ('ask_0001', 'bid_0001'),
     0.0003: ('ask_0003', 'bid_0003'),
@@ -42,8 +39,8 @@ SPREAD_MAP = {
 
 
 def is_btc_eth(market):
-    m = market.upper()
-    return any(x in m for x in ['BTC', 'ETH'])
+    m = market.upper().replace('-', '').replace('/', '').replace('_', '')
+    return m.startswith('BTC') or m.startswith('ETH')
 
 
 def get_metabase_token():
@@ -136,31 +133,53 @@ def fetch_partner_data(token, hours):
 
 
 def compute_breakdown(partner_data, exchange_data):
-    # Groups: (is_btc_eth, spread) -> (passing, total)
     stats = {
         ('btceth', 0.0030): [0, 0],
         ('btceth', 0.0015): [0, 0],
         ('other',  0.0030): [0, 0],
         ('other',  0.0015): [0, 0],
     }
-    for market, spreads in partner_data.items():
-        if market not in exchange_data:
-            continue
-        ex = exchange_data[market]
+    for market, ex in exchange_data.items():
         group = 'btceth' if is_btc_eth(market) else 'other'
         for spread in [0.0015, 0.0030]:
-            if spread not in spreads:
-                continue
             ask_key, bid_key = SPREAD_MAP[spread]
+            key = (group, spread)
+            p_vals = partner_data.get(market, {}).get(spread, None)
+            if p_vals is None:
+                stats[key][1] += 2
+                continue
             ex_ask = ex[ask_key]
             ex_bid = ex[bid_key]
-            vals = spreads[spread]
-            ask_pct = 100 if ex_ask == 0 else 100 * vals['ask'] / ex_ask
-            bid_pct = 100 if ex_bid == 0 else 100 * vals['bid'] / ex_bid
-            key = (group, spread)
+            ask_pct = 100 if ex_ask == 0 else 100 * p_vals['ask'] / ex_ask
+            bid_pct = 100 if ex_bid == 0 else 100 * p_vals['bid'] / ex_bid
             stats[key][0] += (1 if ask_pct >= 60 else 0) + (1 if bid_pct >= 60 else 0)
             stats[key][1] += 2
     return stats
+
+
+def compute_individual(partner_data, exchange_data, market_name):
+    result = {}
+    matched_key = None
+    for m in exchange_data.keys():
+        clean = m.upper().replace('-', '').replace('/', '').replace('_', '')
+        if clean.startswith(market_name.upper()):
+            matched_key = m
+            break
+    if not matched_key:
+        return None
+    ex = exchange_data[matched_key]
+    for spread in [0.0015, 0.0030]:
+        ask_key, bid_key = SPREAD_MAP[spread]
+        p_vals = partner_data.get(matched_key, {}).get(spread, None)
+        if p_vals is None:
+            result[(spread, 'ask')] = 0.0
+            result[(spread, 'bid')] = 0.0
+            continue
+        ex_ask = ex[ask_key]
+        ex_bid = ex[bid_key]
+        result[(spread, 'ask')] = 100.0 if ex_ask == 0 else round(100 * p_vals['ask'] / ex_ask, 1)
+        result[(spread, 'bid')] = 100.0 if ex_bid == 0 else round(100 * p_vals['bid'] / ex_bid, 1)
+    return result
 
 
 def format_stat(stats, group, spread):
@@ -170,6 +189,17 @@ def format_stat(stats, group, spread):
     rate = round(100 * passing / total, 1)
     emoji = '✅' if rate >= 80 else '❌'
     return f'{emoji} `{rate}%` ({passing}/{total})'
+
+
+def format_individual(result, market_name):
+    if not result:
+        return f'  _{market_name}: no data_'
+    lines = []
+    for spread, label in [(0.0030, '30bps'), (0.0015, '15bps')]:
+        ask = result.get((spread, 'ask'), 0)
+        bid = result.get((spread, 'bid'), 0)
+        lines.append(f'  {market_name} {label} ask: `{ask}%`  bid: `{bid}%`')
+    return '\n'.join(lines)
 
 
 def send_telegram(message):
@@ -190,6 +220,11 @@ def main():
         lines.append(f'*── {label} ──*')
         lines.append(f'ETH/BTC 30bps: {format_stat(stats, "btceth", 0.0030)}')
         lines.append(f'ETH/BTC 15bps: {format_stat(stats, "btceth", 0.0015)}')
+
+        for coin in ['BTC', 'ETH']:
+            ind = compute_individual(p_data, ex_data, coin)
+            lines.append(format_individual(ind, coin))
+
         lines.append(f'Other   30bps: {format_stat(stats, "other",  0.0030)}')
         lines.append(f'Other   15bps: {format_stat(stats, "other",  0.0015)}\n')
 
