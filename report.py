@@ -11,29 +11,39 @@ CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
 DATABASE_ID = 100
 
-# Field IDs from metadata
-# partner_liquidity_stats (table 925)
-F_PARTNER    = 5219
-F_MARKET_P   = 5222
-F_SPREAD     = 5223
-F_ASK_LIQ   = 5220
-F_BID_LIQ   = 5224
-F_TIMESTAMP  = 5221
+F_PARTNER   = 5219
+F_MARKET_P  = 5222
+F_SPREAD    = 5223
+F_ASK_LIQ  = 5220
+F_BID_LIQ  = 5224
+F_TIMESTAMP = 5221
 
-# exchange_liquidity_stats (table 2575)
-F_PERIOD     = 9439
-F_EXCHANGE   = 9440
-F_MARKET_E   = 9441
-F_ASK_0001   = 9442
-F_ASK_0003   = 9443
-F_ASK_0015   = 9444
-F_ASK_0030   = 9445
-F_BID_0001   = 9446
-F_BID_0003   = 9447
-F_BID_0015   = 9448
-F_BID_0030   = 9449
+F_PERIOD    = 9439
+F_EXCHANGE  = 9440
+F_MARKET_E  = 9441
+F_ASK_0001  = 9442
+F_ASK_0003  = 9443
+F_ASK_0015  = 9444
+F_ASK_0030  = 9445
+F_BID_0001  = 9446
+F_BID_0003  = 9447
+F_BID_0015  = 9448
+F_BID_0030  = 9449
 
-SPREADS = [0.0001, 0.0003, 0.0015, 0.0030]
+BTC_ETH_MARKETS = {'BTC', 'ETH', 'BTCUSDT', 'ETHUSDT', 'BTC-USD', 'ETH-USD',
+                   'BTC/USD', 'ETH/USD', 'BTCUSD', 'ETHUSD'}
+
+SPREAD_MAP = {
+    0.0001: ('ask_0001', 'bid_0001'),
+    0.0003: ('ask_0003', 'bid_0003'),
+    0.0015: ('ask_0015', 'bid_0015'),
+    0.0030: ('ask_0030', 'bid_0030'),
+}
+
+
+def is_btc_eth(market):
+    m = market.upper()
+    return any(x in m for x in ['BTC', 'ETH'])
 
 
 def get_metabase_token():
@@ -81,7 +91,6 @@ def fetch_exchange_data(token, period):
                 F_ASK_0001, F_ASK_0003, F_ASK_0015, F_ASK_0030,
                 F_BID_0001, F_BID_0003, F_BID_0015, F_BID_0030]
     )
-    # For each market, take MAX across exchanges
     result = defaultdict(lambda: {
         'ask_0001': 0, 'ask_0003': 0, 'ask_0015': 0, 'ask_0030': 0,
         'bid_0001': 0, 'bid_0003': 0, 'bid_0015': 0, 'bid_0030': 0
@@ -110,7 +119,6 @@ def fetch_partner_data(token, hours):
         ],
         fields=[F_MARKET_P, F_SPREAD, F_ASK_LIQ, F_BID_LIQ]
     )
-    # For each market+spread, compute AVG ask and bid
     sums = defaultdict(lambda: defaultdict(lambda: {'ask_sum': 0, 'bid_sum': 0, 'count': 0}))
     for r in rows:
         m = r['market']
@@ -127,31 +135,41 @@ def fetch_partner_data(token, hours):
     return result
 
 
-def compute_success_rate(partner_data, exchange_data):
-    passing = 0
-    total = 0
-    spread_map = {
-        0.0001: ('ask_0001', 'bid_0001'),
-        0.0003: ('ask_0003', 'bid_0003'),
-        0.0015: ('ask_0015', 'bid_0015'),
-        0.0030: ('ask_0030', 'bid_0030'),
+def compute_breakdown(partner_data, exchange_data):
+    # Groups: (is_btc_eth, spread) -> (passing, total)
+    stats = {
+        ('btceth', 0.0030): [0, 0],
+        ('btceth', 0.0015): [0, 0],
+        ('other',  0.0030): [0, 0],
+        ('other',  0.0015): [0, 0],
     }
     for market, spreads in partner_data.items():
         if market not in exchange_data:
             continue
         ex = exchange_data[market]
-        for spread, vals in spreads.items():
-            ask_key, bid_key = spread_map.get(spread, (None, None))
-            if not ask_key:
+        group = 'btceth' if is_btc_eth(market) else 'other'
+        for spread in [0.0015, 0.0030]:
+            if spread not in spreads:
                 continue
+            ask_key, bid_key = SPREAD_MAP[spread]
             ex_ask = ex[ask_key]
             ex_bid = ex[bid_key]
+            vals = spreads[spread]
             ask_pct = 100 if ex_ask == 0 else 100 * vals['ask'] / ex_ask
             bid_pct = 100 if ex_bid == 0 else 100 * vals['bid'] / ex_bid
-            passing += (1 if ask_pct >= 60 else 0) + (1 if bid_pct >= 60 else 0)
-            total += 2
-    rate = round(100 * passing / total, 2) if total else 0
-    return rate, passing, total
+            key = (group, spread)
+            stats[key][0] += (1 if ask_pct >= 60 else 0) + (1 if bid_pct >= 60 else 0)
+            stats[key][1] += 2
+    return stats
+
+
+def format_stat(stats, group, spread):
+    passing, total = stats[(group, spread)]
+    if total == 0:
+        return 'N/A'
+    rate = round(100 * passing / total, 1)
+    emoji = '✅' if rate >= 80 else '❌'
+    return f'{emoji} `{rate}%` ({passing}/{total})'
 
 
 def send_telegram(message):
@@ -167,9 +185,13 @@ def main():
     for label, period, hours in [('1H', '1H', 1), ('12H', '12H', 12)]:
         ex_data = fetch_exchange_data(token, period)
         p_data = fetch_partner_data(token, hours)
-        rate, passing, total = compute_success_rate(p_data, ex_data)
-        emoji = '✅' if rate >= 80 else '❌'
-        lines.append(f'{emoji} *{label}*: `{rate}%` success ({passing}/{total} pairs ≥60%)')
+        stats = compute_breakdown(p_data, ex_data)
+
+        lines.append(f'*── {label} ──*')
+        lines.append(f'ETH/BTC 30bps: {format_stat(stats, "btceth", 0.0030)}')
+        lines.append(f'ETH/BTC 15bps: {format_stat(stats, "btceth", 0.0015)}')
+        lines.append(f'Other   30bps: {format_stat(stats, "other",  0.0030)}')
+        lines.append(f'Other   15bps: {format_stat(stats, "other",  0.0015)}\n')
 
     send_telegram('\n'.join(lines))
 
