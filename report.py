@@ -21,12 +21,8 @@ F_TIMESTAMP = 5221
 F_PERIOD    = 9439
 F_EXCHANGE  = 9440
 F_MARKET_E  = 9441
-F_ASK_0001  = 9442
-F_ASK_0003  = 9443
 F_ASK_0015  = 9444
 F_ASK_0030  = 9445
-F_BID_0001  = 9446
-F_BID_0003  = 9447
 F_BID_0015  = 9448
 F_BID_0030  = 9449
 
@@ -35,8 +31,8 @@ SPREAD_MAP = {
     0.0030: ('ask_0030', 'bid_0030'),
 }
 
-# Individual coins to show separately
 INDIVIDUAL_COINS = ['BTC', 'ETH', 'SOL', 'XAU', 'XAG']
+CAP = 300.0
 
 
 def get_group(market):
@@ -57,15 +53,18 @@ def get_metabase_token():
     return res.json()['id']
 
 
-def mbql_query(token, table_id, filters, fields):
+def mbql_query(token, table_id, filters, fields=None, aggregation=None):
+    query = {'source-table': table_id}
+    if filters:
+        query['filter'] = filters
+    if fields:
+        query['fields'] = [['field', f, None] for f in fields]
+    if aggregation:
+        query['aggregation'] = aggregation
     payload = {
         'database': DATABASE_ID,
         'type': 'query',
-        'query': {
-            'source-table': table_id,
-            'fields': [['field', f, None] for f in fields],
-            'filter': filters
-        }
+        'query': query
     }
     res = requests.post(
         f'{METABASE_URL}/api/dataset',
@@ -80,6 +79,28 @@ def mbql_query(token, table_id, filters, fields):
     return [dict(zip(cols, row)) for row in rows]
 
 
+def fetch_latest_timestamp(token):
+    payload = {
+        'database': DATABASE_ID,
+        'type': 'query',
+        'query': {
+            'source-table': 925,
+            'aggregation': [['max', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}]]],
+            'filter': ['=', ['field', F_PARTNER, None], 'Albert Blanc']
+        }
+    }
+    res = requests.post(
+        f'{METABASE_URL}/api/dataset',
+        headers={'X-Metabase-Session': token, 'Content-Type': 'application/json'},
+        json=payload
+    )
+    if res.status_code != 202:
+        raise Exception(f'Timestamp query failed: {res.status_code} {res.text[:500]}')
+    data = res.json()
+    latest = data['data']['rows'][0][0]
+    return datetime.fromisoformat(latest.replace('Z', '+00:00'))
+
+
 def fetch_exchange_data(token, period):
     rows = mbql_query(
         token,
@@ -88,9 +109,7 @@ def fetch_exchange_data(token, period):
             ['=', ['field', F_PERIOD, None], period],
             ['=', ['field', F_EXCHANGE, None], 'BINANCE', 'HYPERLIQUID']
         ],
-        fields=[F_MARKET_E, F_EXCHANGE,
-                F_ASK_0015, F_ASK_0030,
-                F_BID_0015, F_BID_0030]
+        fields=[F_MARKET_E, F_EXCHANGE, F_ASK_0015, F_ASK_0030, F_BID_0015, F_BID_0030]
     )
     result = defaultdict(lambda: {
         'ask_0015': 0, 'ask_0030': 0,
@@ -112,13 +131,17 @@ def fetch_exchange_data(token, period):
 
 
 def fetch_partner_data(token, hours):
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
+    latest_dt = fetch_latest_timestamp(token)
+    cutoff = (latest_dt - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
+    latest_str = latest_dt.strftime('%Y-%m-%dT%H:%M:%S')
+
     rows = mbql_query(
         token,
         table_id=925,
         filters=['and',
             ['=', ['field', F_PARTNER, None], 'Albert Blanc'],
-            ['>', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], cutoff]
+            ['>', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], cutoff],
+            ['<=', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], latest_str]
         ],
         fields=[F_MARKET_P, F_SPREAD, F_ASK_LIQ, F_BID_LIQ]
     )
@@ -145,13 +168,17 @@ def compute_pct(p_val, ex_val):
     return round(100 * p_val / ex_val, 1)
 
 
+def cap_pct(pct):
+    """Cap at 300% so outliers don't skew averages"""
+    return min(pct, CAP)
+
+
 def fmt(pct):
     emoji = '✅' if pct >= 100 else '❌'
     return f'{emoji} `{pct}%`'
 
 
 def compute_individual(partner_data, exchange_data, coin):
-    """Returns {(spread, side): pct} for a specific coin"""
     matched_key = None
     for m in exchange_data.keys():
         clean = m.upper().replace('-', '').replace('/', '').replace('_', '')
@@ -164,22 +191,20 @@ def compute_individual(partner_data, exchange_data, coin):
         ask_key, bid_key = SPREAD_MAP[spread]
         ex = exchange_data.get(matched_key, {}) if matched_key else {}
         p_vals = partner_data.get(matched_key, {}).get(spread, None) if matched_key else None
-
         ex_ask = ex.get(ask_key, 0)
         ex_bid = ex.get(bid_key, 0)
-
         if p_vals is None:
             result[(spread, 'ask')] = 0.0
             result[(spread, 'bid')] = 0.0
         else:
+            # Individual coins: show real % uncapped so you see actual performance
             result[(spread, 'ask')] = compute_pct(p_vals['ask'], ex_ask)
             result[(spread, 'bid')] = compute_pct(p_vals['bid'], ex_bid)
-
     return result
 
 
 def compute_other_avgs(partner_data, exchange_data):
-    """Average % across all 'other' markets for each spread/side"""
+    """Average % across all 'other' markets, capped at 300% per market"""
     sums = {
         (0.0030, 'ask'): [], (0.0030, 'bid'): [],
         (0.0015, 'ask'): [], (0.0015, 'bid'): [],
@@ -196,8 +221,8 @@ def compute_other_avgs(partner_data, exchange_data):
                 sums[(spread, 'ask')].append(0.0)
                 sums[(spread, 'bid')].append(0.0)
             else:
-                sums[(spread, 'ask')].append(compute_pct(p_vals['ask'], ex_ask))
-                sums[(spread, 'bid')].append(compute_pct(p_vals['bid'], ex_bid))
+                sums[(spread, 'ask')].append(cap_pct(compute_pct(p_vals['ask'], ex_ask)))
+                sums[(spread, 'bid')].append(cap_pct(compute_pct(p_vals['bid'], ex_bid)))
 
     result = {}
     for key, vals in sums.items():
@@ -212,6 +237,11 @@ def format_coin_block(name, data):
         bid = data.get((spread, 'bid'), 0.0)
         lines.append(f'  {label} ask: {fmt(ask)}  bid: {fmt(bid)}')
     return '\n'.join(lines)
+
+
+def send_telegram(message):
+    url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
+    requests.post(url, json={'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'Markdown'})
 
 
 def main():
@@ -231,17 +261,12 @@ def main():
             lines.append(format_coin_block(coin, ind))
             lines.append('')
 
-        # Other (averaged)
+        # Other averaged with 300% cap
         other = compute_other_avgs(p_data, ex_data)
-        lines.append(format_coin_block('Other (avg)', other))
+        lines.append(format_coin_block('Other (avg, capped at 300%)', other))
         lines.append('')
 
     send_telegram('\n'.join(lines))
-
-
-def send_telegram(message):
-    url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
-    requests.post(url, json={'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'Markdown'})
 
 
 if __name__ == '__main__':
