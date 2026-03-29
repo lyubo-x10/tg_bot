@@ -79,28 +79,6 @@ def mbql_query(token, table_id, filters, fields=None, aggregation=None):
     return [dict(zip(cols, row)) for row in rows]
 
 
-def fetch_latest_timestamp(token):
-    payload = {
-        'database': DATABASE_ID,
-        'type': 'query',
-        'query': {
-            'source-table': 925,
-            'aggregation': [['max', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}]]],
-            'filter': ['=', ['field', F_PARTNER, None], 'Albert Blanc']
-        }
-    }
-    res = requests.post(
-        f'{METABASE_URL}/api/dataset',
-        headers={'X-Metabase-Session': token, 'Content-Type': 'application/json'},
-        json=payload
-    )
-    if res.status_code != 202:
-        raise Exception(f'Timestamp query failed: {res.status_code} {res.text[:500]}')
-    data = res.json()
-    latest = data['data']['rows'][0][0]
-    return datetime.fromisoformat(latest.replace('Z', '+00:00'))
-
-
 def fetch_exchange_data(token, period):
     rows = mbql_query(
         token,
@@ -131,17 +109,14 @@ def fetch_exchange_data(token, period):
 
 
 def fetch_partner_data(token, hours):
-    latest_dt = fetch_latest_timestamp(token)
-    cutoff = (latest_dt - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
-    latest_str = latest_dt.strftime('%Y-%m-%dT%H:%M:%S')
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
 
     rows = mbql_query(
         token,
         table_id=925,
         filters=['and',
             ['=', ['field', F_PARTNER, None], 'Albert Blanc'],
-            ['>', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], cutoff],
-            ['<=', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], latest_str]
+            ['>', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], cutoff]
         ],
         fields=[F_MARKET_P, F_SPREAD, F_ASK_LIQ, F_BID_LIQ]
     )
@@ -162,14 +137,12 @@ def fetch_partner_data(token, hours):
 
 
 def compute_pct(p_val, ex_val):
-    """% of target (100% = meeting the 60% threshold)"""
     if ex_val == 0:
         return 100.0
     return round(100 * p_val / ex_val, 1)
 
 
 def cap_pct(pct):
-    """Cap at 300% so outliers don't skew averages"""
     return min(pct, CAP)
 
 
@@ -197,14 +170,12 @@ def compute_individual(partner_data, exchange_data, coin):
             result[(spread, 'ask')] = 0.0
             result[(spread, 'bid')] = 0.0
         else:
-            # Individual coins: show real % uncapped so you see actual performance
             result[(spread, 'ask')] = compute_pct(p_vals['ask'], ex_ask)
             result[(spread, 'bid')] = compute_pct(p_vals['bid'], ex_bid)
     return result
 
 
 def compute_other_avgs(partner_data, exchange_data):
-    """Average % across all 'other' markets, capped at 300% per market"""
     sums = {
         (0.0030, 'ask'): [], (0.0030, 'bid'): [],
         (0.0015, 'ask'): [], (0.0015, 'bid'): [],
@@ -255,13 +226,11 @@ def main():
 
         lines.append(f'*── {label} ──*\n')
 
-        # Individual coins
         for coin in INDIVIDUAL_COINS:
             ind = compute_individual(p_data, ex_data, coin)
             lines.append(format_coin_block(coin, ind))
             lines.append('')
 
-        # Other averaged with 300% cap
         other = compute_other_avgs(p_data, ex_data)
         lines.append(format_coin_block('Other (avg, capped at 300%)', other))
         lines.append('')
