@@ -31,16 +31,20 @@ F_BID_0015  = 9448
 F_BID_0030  = 9449
 
 SPREAD_MAP = {
-    0.0001: ('ask_0001', 'bid_0001'),
-    0.0003: ('ask_0003', 'bid_0003'),
     0.0015: ('ask_0015', 'bid_0015'),
     0.0030: ('ask_0030', 'bid_0030'),
 }
 
+# Individual coins to show separately
+INDIVIDUAL_COINS = ['BTC', 'ETH', 'SOL', 'XAU', 'XAG']
 
-def is_btc_eth(market):
+
+def get_group(market):
     m = market.upper().replace('-', '').replace('/', '').replace('_', '')
-    return m.startswith('BTC') or m.startswith('ETH')
+    for coin in INDIVIDUAL_COINS:
+        if m.startswith(coin):
+            return coin
+    return 'other'
 
 
 def get_metabase_token():
@@ -85,23 +89,25 @@ def fetch_exchange_data(token, period):
             ['=', ['field', F_EXCHANGE, None], 'BINANCE', 'HYPERLIQUID']
         ],
         fields=[F_MARKET_E, F_EXCHANGE,
-                F_ASK_0001, F_ASK_0003, F_ASK_0015, F_ASK_0030,
-                F_BID_0001, F_BID_0003, F_BID_0015, F_BID_0030]
+                F_ASK_0015, F_ASK_0030,
+                F_BID_0015, F_BID_0030]
     )
     result = defaultdict(lambda: {
-        'ask_0001': 0, 'ask_0003': 0, 'ask_0015': 0, 'ask_0030': 0,
-        'bid_0001': 0, 'bid_0003': 0, 'bid_0015': 0, 'bid_0030': 0
+        'ask_0015': 0, 'ask_0030': 0,
+        'bid_0015': 0, 'bid_0030': 0
     })
     for r in rows:
         m = r['market']
-        result[m]['ask_0001'] = max(result[m]['ask_0001'], float(r['ask_avg_liquidity_0_0001'] or 0))
-        result[m]['ask_0003'] = max(result[m]['ask_0003'], float(r['ask_avg_liquidity_0_0003'] or 0))
         result[m]['ask_0015'] = max(result[m]['ask_0015'], float(r['ask_avg_liquidity_0_0015'] or 0))
         result[m]['ask_0030'] = max(result[m]['ask_0030'], float(r['ask_avg_liquidity_0_0030'] or 0))
-        result[m]['bid_0001'] = max(result[m]['bid_0001'], float(r['bid_avg_liquidity_0_0001'] or 0))
-        result[m]['bid_0003'] = max(result[m]['bid_0003'], float(r['bid_avg_liquidity_0_0003'] or 0))
         result[m]['bid_0015'] = max(result[m]['bid_0015'], float(r['bid_avg_liquidity_0_0015'] or 0))
         result[m]['bid_0030'] = max(result[m]['bid_0030'], float(r['bid_avg_liquidity_0_0030'] or 0))
+
+    # Apply 0.6 — this is the actual target
+    for m in result:
+        for k in result[m]:
+            result[m][k] *= 0.6
+
     return result
 
 
@@ -132,79 +138,80 @@ def fetch_partner_data(token, hours):
     return result
 
 
-def compute_breakdown(partner_data, exchange_data):
-    stats = {
-        ('btceth', 0.0030): [0, 0],
-        ('btceth', 0.0015): [0, 0],
-        ('other',  0.0030): [0, 0],
-        ('other',  0.0015): [0, 0],
-    }
-    for market, ex in exchange_data.items():
-        group = 'btceth' if is_btc_eth(market) else 'other'
-        for spread in [0.0015, 0.0030]:
-            ask_key, bid_key = SPREAD_MAP[spread]
-            key = (group, spread)
-            p_vals = partner_data.get(market, {}).get(spread, None)
-            if p_vals is None:
-                stats[key][1] += 2
-                continue
-            ex_ask = ex[ask_key]
-            ex_bid = ex[bid_key]
-            ask_pct = 100 if ex_ask == 0 else 100 * p_vals['ask'] / ex_ask
-            bid_pct = 100 if ex_bid == 0 else 100 * p_vals['bid'] / ex_bid
-            stats[key][0] += (1 if ask_pct >= 60 else 0) + (1 if bid_pct >= 60 else 0)
-            stats[key][1] += 2
-    return stats
+def compute_pct(p_val, ex_val):
+    """% of target (100% = meeting the 60% threshold)"""
+    if ex_val == 0:
+        return 100.0
+    return round(100 * p_val / ex_val, 1)
 
 
-def compute_individual(partner_data, exchange_data, market_name):
-    result = {}
+def fmt(pct):
+    emoji = '✅' if pct >= 100 else '❌'
+    return f'{emoji} `{pct}%`'
+
+
+def compute_individual(partner_data, exchange_data, coin):
+    """Returns {(spread, side): pct} for a specific coin"""
     matched_key = None
     for m in exchange_data.keys():
         clean = m.upper().replace('-', '').replace('/', '').replace('_', '')
-        if clean.startswith(market_name.upper()):
+        if clean.startswith(coin.upper()):
             matched_key = m
             break
-    if not matched_key:
-        return None
-    ex = exchange_data[matched_key]
-    for spread in [0.0015, 0.0030]:
+
+    result = {}
+    for spread in [0.0030, 0.0015]:
         ask_key, bid_key = SPREAD_MAP[spread]
-        p_vals = partner_data.get(matched_key, {}).get(spread, None)
+        ex = exchange_data.get(matched_key, {}) if matched_key else {}
+        p_vals = partner_data.get(matched_key, {}).get(spread, None) if matched_key else None
+
+        ex_ask = ex.get(ask_key, 0)
+        ex_bid = ex.get(bid_key, 0)
+
         if p_vals is None:
             result[(spread, 'ask')] = 0.0
             result[(spread, 'bid')] = 0.0
-            continue
-        ex_ask = ex[ask_key]
-        ex_bid = ex[bid_key]
-        result[(spread, 'ask')] = 100.0 if ex_ask == 0 else round(100 * p_vals['ask'] / ex_ask, 1)
-        result[(spread, 'bid')] = 100.0 if ex_bid == 0 else round(100 * p_vals['bid'] / ex_bid, 1)
+        else:
+            result[(spread, 'ask')] = compute_pct(p_vals['ask'], ex_ask)
+            result[(spread, 'bid')] = compute_pct(p_vals['bid'], ex_bid)
+
     return result
 
 
-def format_stat(stats, group, spread):
-    passing, total = stats[(group, spread)]
-    if total == 0:
-        return 'N/A'
-    rate = round(100 * passing / total, 1)
-    emoji = '✅' if rate >= 80 else '❌'
-    return f'{emoji} `{rate}%` ({passing}/{total})'
+def compute_other_avgs(partner_data, exchange_data):
+    """Average % across all 'other' markets for each spread/side"""
+    sums = {
+        (0.0030, 'ask'): [], (0.0030, 'bid'): [],
+        (0.0015, 'ask'): [], (0.0015, 'bid'): [],
+    }
+    for market, ex in exchange_data.items():
+        if get_group(market) != 'other':
+            continue
+        for spread in [0.0030, 0.0015]:
+            ask_key, bid_key = SPREAD_MAP[spread]
+            p_vals = partner_data.get(market, {}).get(spread, None)
+            ex_ask = ex[ask_key]
+            ex_bid = ex[bid_key]
+            if p_vals is None:
+                sums[(spread, 'ask')].append(0.0)
+                sums[(spread, 'bid')].append(0.0)
+            else:
+                sums[(spread, 'ask')].append(compute_pct(p_vals['ask'], ex_ask))
+                sums[(spread, 'bid')].append(compute_pct(p_vals['bid'], ex_bid))
+
+    result = {}
+    for key, vals in sums.items():
+        result[key] = round(sum(vals) / len(vals), 1) if vals else 0.0
+    return result
 
 
-def format_individual(result, market_name):
-    if not result:
-        return f'  _{market_name}: no data_'
-    lines = []
+def format_coin_block(name, data):
+    lines = [f'*{name}*']
     for spread, label in [(0.0030, '30bps'), (0.0015, '15bps')]:
-        ask = result.get((spread, 'ask'), 0)
-        bid = result.get((spread, 'bid'), 0)
-        lines.append(f'  {market_name} {label} ask: `{ask}%`  bid: `{bid}%`')
+        ask = data.get((spread, 'ask'), 0.0)
+        bid = data.get((spread, 'bid'), 0.0)
+        lines.append(f'  {label} ask: {fmt(ask)}  bid: {fmt(bid)}')
     return '\n'.join(lines)
-
-
-def send_telegram(message):
-    url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
-    requests.post(url, json={'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'Markdown'})
 
 
 def main():
@@ -215,20 +222,26 @@ def main():
     for label, period, hours in [('1H', '1H', 1), ('12H', '12H', 12)]:
         ex_data = fetch_exchange_data(token, period)
         p_data = fetch_partner_data(token, hours)
-        stats = compute_breakdown(p_data, ex_data)
 
-        lines.append(f'*── {label} ──*')
-        lines.append(f'ETH/BTC 30bps: {format_stat(stats, "btceth", 0.0030)}')
-        lines.append(f'ETH/BTC 15bps: {format_stat(stats, "btceth", 0.0015)}')
+        lines.append(f'*── {label} ──*\n')
 
-        for coin in ['BTC', 'ETH']:
+        # Individual coins
+        for coin in INDIVIDUAL_COINS:
             ind = compute_individual(p_data, ex_data, coin)
-            lines.append(format_individual(ind, coin))
+            lines.append(format_coin_block(coin, ind))
+            lines.append('')
 
-        lines.append(f'Other   30bps: {format_stat(stats, "other",  0.0030)}')
-        lines.append(f'Other   15bps: {format_stat(stats, "other",  0.0015)}\n')
+        # Other (averaged)
+        other = compute_other_avgs(p_data, ex_data)
+        lines.append(format_coin_block('Other (avg)', other))
+        lines.append('')
 
     send_telegram('\n'.join(lines))
+
+
+def send_telegram(message):
+    url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
+    requests.post(url, json={'chat_id': CHAT_ID, 'text': message, 'parse_mode': 'Markdown'})
 
 
 if __name__ == '__main__':
