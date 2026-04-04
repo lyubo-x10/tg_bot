@@ -113,7 +113,7 @@ def fetch_partner_data(token, hours):
         token,
         table_id=925,
         filters=['and',
-            ['=', ['field', F_PARTNER, None], 'Albert Blanc'],
+            ['=', ['field', F_PARTNER, None], 'Alber Blanc'],
             ['>', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], cutoff]
         ],
         fields=[F_MARKET_P, F_SPREAD, F_ASK_LIQ, F_BID_LIQ]
@@ -216,7 +216,7 @@ def send_telegram(message):
 def main():
     token = get_metabase_token()
 
-    lines = ['📊 *Daily Liquidity Report — Albert Blanc*\n']
+    lines = ['📊 *Daily Liquidity Report — Alber Blanc*\n']
 
     for label, period, hours in [('1H', '1H', 1), ('12H', '12H', 12)]:
         ex_data = fetch_exchange_data(token, period)
