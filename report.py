@@ -108,6 +108,7 @@ def fetch_exchange_data(token, period):
 
 def fetch_partner_data(token, hours):
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
+    print(f'Cutoff: {cutoff}')
 
     rows = mbql_query(
         token,
@@ -118,6 +119,10 @@ def fetch_partner_data(token, hours):
         ],
         fields=[F_MARKET_P, F_SPREAD, F_ASK_LIQ, F_BID_LIQ]
     )
+    print(f'Partner rows returned: {len(rows)}')
+    if rows:
+        print(f'Sample row: {rows[0]}')
+
     sums = defaultdict(lambda: defaultdict(lambda: {'ask_sum': 0, 'bid_sum': 0, 'count': 0}))
     for r in rows:
         m = r['market']
