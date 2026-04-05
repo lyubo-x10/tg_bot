@@ -107,39 +107,17 @@ def fetch_exchange_data(token, period):
 
 
 def fetch_partner_data(token, hours):
-    # First find the latest timestamp in the table
-    payload = {
-        'database': DATABASE_ID,
-        'type': 'query',
-        'query': {
-            'source-table': 925,
-            'aggregation': [['max', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}]]],
-            'filter': ['=', ['field', F_PARTNER, None], 'Alber Blanc']
-        }
-    }
-    res = requests.post(
-        f'{METABASE_URL}/api/dataset',
-        headers={'X-Metabase-Session': token, 'Content-Type': 'application/json'},
-        json=payload
-    )
-    latest_raw = res.json()['data']['rows'][0][0]
-    latest_dt = datetime.fromisoformat(latest_raw.replace('Z', '+00:00'))
-    cutoff = (latest_dt - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
-    latest_str = latest_dt.strftime('%Y-%m-%dT%H:%M:%S')
-    print(f'Latest timestamp: {latest_str}, cutoff: {cutoff}')
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
 
     rows = mbql_query(
         token,
         table_id=925,
         filters=['and',
-            ['=', ['field', F_PARTNER, None], 'Alber Blanc'],
-            ['>', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], cutoff],
-            ['<=', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], latest_str]
+            ['=', ['field', F_PARTNER, None], 'Albert Blanc'],
+            ['>', ['field', F_TIMESTAMP, {'base-type': 'type/DateTime'}], cutoff]
         ],
         fields=[F_MARKET_P, F_SPREAD, F_ASK_LIQ, F_BID_LIQ]
     )
-    print(f'Partner rows returned: {len(rows)}')
-
     sums = defaultdict(lambda: defaultdict(lambda: {'ask_sum': 0, 'bid_sum': 0, 'count': 0}))
     for r in rows:
         m = r['market']
