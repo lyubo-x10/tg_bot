@@ -32,7 +32,7 @@ SPREAD_MAP = {
 }
 
 PARTNER_NAME = 'Albert Blanc'
-INDIVIDUAL_COINS = ['BTC', 'ETH', 'SOL', 'XAU', 'XAG']
+INDIVIDUAL_COINS = ['BTC', 'ETH', 'SOL', 'XAU', 'XAG', 'WTI', 'XBR']
 CAP = 300.0
 
 
