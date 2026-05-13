@@ -88,21 +88,31 @@ def fetch_exchange_data(token, period):
         ],
         fields=[F_MARKET_E, F_EXCHANGE, F_ASK_0015, F_ASK_0030, F_BID_0015, F_BID_0030]
     )
-    result = defaultdict(lambda: {
-        'ask_0015': 0, 'ask_0030': 0,
-        'bid_0015': 0, 'bid_0030': 0
-    })
+
+    # For each market, pick the single exchange with highest bid_0030
+    # (mirrors the new SQL: ROW_NUMBER() ORDER BY bid_avg_liquidity_0_0030 DESC)
+    best = {}
     for r in rows:
         m = r['market']
-        result[m]['ask_0015'] = max(result[m]['ask_0015'], float(r['ask_avg_liquidity_0_0015'] or 0))
-        result[m]['ask_0030'] = max(result[m]['ask_0030'], float(r['ask_avg_liquidity_0_0030'] or 0))
-        result[m]['bid_0015'] = max(result[m]['bid_0015'], float(r['bid_avg_liquidity_0_0015'] or 0))
-        result[m]['bid_0030'] = max(result[m]['bid_0030'], float(r['bid_avg_liquidity_0_0030'] or 0))
+        bid_0030 = float(r['bid_avg_liquidity_0_0030'] or 0)
+        if m not in best or bid_0030 > best[m]['bid_0030_raw']:
+            best[m] = {
+                'bid_0030_raw': bid_0030,
+                'ask_0015': float(r['ask_avg_liquidity_0_0015'] or 0),
+                'ask_0030': float(r['ask_avg_liquidity_0_0030'] or 0),
+                'bid_0015': float(r['bid_avg_liquidity_0_0015'] or 0),
+                'bid_0030': float(r['bid_avg_liquidity_0_0030'] or 0),
+            }
 
-    for m in result:
-        for k in result[m]:
-            result[m][k] *= 0.6
-
+    # Apply 0.6 target multiplier
+    result = {}
+    for m, v in best.items():
+        result[m] = {
+            'ask_0015': v['ask_0015'] * 0.6,
+            'ask_0030': v['ask_0030'] * 0.6,
+            'bid_0015': v['bid_0015'] * 0.6,
+            'bid_0030': v['bid_0030'] * 0.6,
+        }
     return result
 
 
