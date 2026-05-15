@@ -278,7 +278,7 @@ def main():
         lines.append(format_coin_block('Other (avg, capped at 300%)', other))
         lines.append('')
 
-    lines.append('[Dashboards link](https://x10.metabaseapp.com/public/dashboard/9f5dc6ed-2492-4a8a-a06b-0a4129da7144?tab=232-1-hour)')
+    lines.append('→ Link to [Dashboards](https://x10.metabaseapp.com/public/dashboard/9f5dc6ed-2492-4a8a-a06b-0a4129da7144?tab=232-1-hour)')
     send_telegram('\n'.join(lines))
 
 
