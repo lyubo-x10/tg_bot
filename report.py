@@ -217,12 +217,11 @@ def fmt(pct):
 
 
 def compute_individual(total_data, exchange_data, coin):
-    matched_key = None
-    for m in exchange_data.keys():
-        clean = m.upper().replace('-', '').replace('/', '').replace('_', '')
-        if clean.startswith(coin.upper()):
-            matched_key = m
-            break
+    # Shortest match wins: ETH-USD beats ETHSPOT-USD
+    cu = coin.upper()
+    candidates = [m for m in exchange_data.keys()
+                  if m.upper().replace('-', '').replace('/', '').replace('_', '').startswith(cu)]
+    matched_key = min(candidates, key=len) if candidates else None
 
     result = {}
     for spread in [0.0030, 0.0015]:
@@ -295,6 +294,10 @@ def main():
     for label, period, hours in [('1H', '1H', 1), ('12H', '12H', 12)]:
         ex_data = fetch_exchange_data(token, period)
         total_data = fetch_total_liquidity(token, hours, markets_map)
+
+        # DEBUG — remove once ETH is confirmed fixed
+        print(f"{label} ETH-ish benchmark markets: {[m for m in ex_data if 'ETH' in m.upper()]}")
+        print(f"{label} ETH-USD in depths totals: {'ETH-USD' in total_data}")
 
         lines.append(f'*── {label} ──*\n')
 
