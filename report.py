@@ -11,20 +11,7 @@ CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
 DATABASE_ID = 100
 
-# depths (table 874)
-T_DEPTHS    = 874
-F_D_MARKET_ID = 4410
-F_D_SPREAD    = 4407
-F_D_TIMESTAMP = 4411
-F_D_ASK_DEPTH = 4408
-F_D_BID_DEPTH = 4412
-
-# assets.markets (table 876)
-T_MARKETS   = 876
-F_M_ID      = 4323
-F_M_NAME    = 4328
-
-# exchange_liquidity_stats (table 2575)
+# exchange_liquidity_stats (table 2575, schema stats)
 F_PERIOD    = 9439
 F_EXCHANGE  = 9440
 F_MARKET_E  = 9441
@@ -33,11 +20,26 @@ F_ASK_0030  = 9445
 F_BID_0015  = 9448
 F_BID_0030  = 9449
 
-# depths.spread_size is stored as percent units (0.15 = 15bps, 0.30 = 30bps)
+# depths (table 874) — total Extended orderbook liquidity
+T_DEPTHS    = 874
+F_D_TS      = 4411
+F_D_SPREAD  = 4407
+F_D_ASK     = 4408
+F_D_BID     = 4412
+F_D_MKT     = 4410
+
+# assets.markets (table 876) — market_id -> market name
+T_MARKETS   = 876
+F_M_ID      = 4323
+F_M_NAME    = 4328
+
 SPREAD_MAP = {
-    0.15: ('ask_0015', 'bid_0015'),
-    0.30: ('ask_0030', 'bid_0030'),
+    0.0015: ('ask_0015', 'bid_0015'),
+    0.0030: ('ask_0030', 'bid_0030'),
 }
+
+# depths.spread_size is in percent units: 0.15 = 15bps, 0.30 = 30bps
+SPREAD_SIZE_TO_KEY = {0.15: 0.0015, 0.3: 0.0030}
 
 INDIVIDUAL_COINS = ['BTC', 'ETH', 'SOL', 'XAU', 'XAG', 'WTI', 'XBR']
 CAP = 300.0
@@ -61,7 +63,17 @@ def get_metabase_token():
     return res.json()['id']
 
 
-def run_dataset(token, payload):
+def mbql_query(token, table_id, filters, fields=None):
+    query = {'source-table': table_id}
+    if filters:
+        query['filter'] = filters
+    if fields:
+        query['fields'] = [['field', f, None] for f in fields]
+    payload = {
+        'database': DATABASE_ID,
+        'type': 'query',
+        'query': query
+    }
     res = requests.post(
         f'{METABASE_URL}/api/dataset',
         headers={'X-Metabase-Session': token, 'Content-Type': 'application/json'},
@@ -76,29 +88,18 @@ def run_dataset(token, payload):
 
 
 def fetch_exchange_data(token, period):
-    payload = {
-        'database': DATABASE_ID,
-        'type': 'query',
-        'query': {
-            'source-table': 2575,
-            'filter': ['and',
-                ['=', ['field', F_PERIOD, None], period],
-                ['=', ['field', F_EXCHANGE, None], 'BINANCE', 'HYPERLIQUID']
-            ],
-            'fields': [
-                ['field', F_MARKET_E, None],
-                ['field', F_EXCHANGE, None],
-                ['field', F_ASK_0015, None],
-                ['field', F_ASK_0030, None],
-                ['field', F_BID_0015, None],
-                ['field', F_BID_0030, None],
-            ]
-        }
-    }
-    rows = run_dataset(token, payload)
+    rows = mbql_query(
+        token,
+        table_id=2575,
+        filters=['and',
+            ['=', ['field', F_PERIOD, None], period],
+            ['=', ['field', F_EXCHANGE, None], 'BINANCE', 'HYPERLIQUID']
+        ],
+        fields=[F_MARKET_E, F_EXCHANGE, F_ASK_0015, F_ASK_0030, F_BID_0015, F_BID_0030]
+    )
 
-    # Per-market pick the exchange with the highest bid_0030
-    # (mirrors SQL: ROW_NUMBER() OVER (PARTITION BY market ORDER BY bid_avg_liquidity_0_0030 DESC))
+    # Pick the single best exchange per market (highest bid_0030),
+    # mirrors the SQL: ROW_NUMBER() ORDER BY bid_avg_liquidity_0_0030 DESC
     best = {}
     for r in rows:
         m = r['market']
@@ -112,7 +113,7 @@ def fetch_exchange_data(token, period):
                 'bid_0030': float(r['bid_avg_liquidity_0_0030'] or 0),
             }
 
-    # Apply the 0.6 target multiplier
+    # Apply 0.6 — this is the actual target
     result = {}
     for m, v in best.items():
         result[m] = {
@@ -124,58 +125,77 @@ def fetch_exchange_data(token, period):
     return result
 
 
-def fetch_partner_data(token, hours):
-    """Fetch TOTAL Extended liquidity from `depths` joined with `assets.markets`.
-    Replaces the old AB-only `partner_liquidity_stats` query per AB's correction.
-    """
-    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
-    cutoff = cutoff_dt.strftime('%Y-%m-%dT%H:%M:%S')
-    print(f'Depths cutoff: {cutoff}')
+def fetch_markets_map(token):
+    """market_id -> market name from assets.markets"""
+    rows = mbql_query(token, table_id=T_MARKETS, filters=None, fields=[F_M_ID, F_M_NAME])
+    return {int(r['id']): r['name'] for r in rows}
+
+
+def fetch_total_liquidity(token, hours, markets_map):
+    """Total Extended liquidity from depths, averaged over the window, keyed by market name."""
+    # Anchor to the latest timestamp in depths
+    res = requests.post(
+        f'{METABASE_URL}/api/dataset',
+        headers={'X-Metabase-Session': token, 'Content-Type': 'application/json'},
+        json={
+            'database': DATABASE_ID,
+            'type': 'query',
+            'query': {
+                'source-table': T_DEPTHS,
+                'aggregation': [['max', ['field', F_D_TS, {'base-type': 'type/DateTime'}]]]
+            }
+        }
+    )
+    latest_raw = res.json()['data']['rows'][0][0]
+    if latest_raw is None:
+        raise Exception('depths table returned no latest timestamp')
+    latest_dt = datetime.fromisoformat(latest_raw.replace('Z', '+00:00'))
+    cutoff = (latest_dt - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%S')
+    latest_str = latest_dt.strftime('%Y-%m-%dT%H:%M:%S')
+    print(f'Depths latest: {latest_str}, cutoff: {cutoff}')
 
     payload = {
         'database': DATABASE_ID,
         'type': 'query',
         'query': {
             'source-table': T_DEPTHS,
-            'filter': ['>=',
-                ['field', F_D_TIMESTAMP, {'base-type': 'type/DateTime'}],
-                cutoff
+            'aggregation': [
+                ['avg', ['field', F_D_ASK, None]],
+                ['avg', ['field', F_D_BID, None]]
             ],
-            'joins': [{
-                'source-table': T_MARKETS,
-                'alias': 'm',
-                'condition': ['=',
-                    ['field', F_D_MARKET_ID, None],
-                    ['field', F_M_ID, {'join-alias': 'm'}]
-                ],
-                'fields': [['field', F_M_NAME, {'join-alias': 'm'}]]
-            }],
-            'fields': [
-                ['field', F_D_SPREAD, None],
-                ['field', F_D_ASK_DEPTH, None],
-                ['field', F_D_BID_DEPTH, None],
+            'breakout': [
+                ['field', F_D_MKT, None],
+                ['field', F_D_SPREAD, None]
+            ],
+            'filter': ['and',
+                ['>', ['field', F_D_TS, {'base-type': 'type/DateTime'}], cutoff],
+                ['<=', ['field', F_D_TS, {'base-type': 'type/DateTime'}], latest_str],
+                ['=', ['field', F_D_SPREAD, None], 0.15, 0.3]
             ]
         }
     }
-    rows = run_dataset(token, payload)
-    print(f'Depths rows returned: {len(rows)}')
-
-    sums = defaultdict(lambda: defaultdict(lambda: {'ask_sum': 0, 'bid_sum': 0, 'count': 0}))
-    for r in rows:
-        m = r.get('name') or r.get('m__name') or r.get('markets__name')
-        if m is None:
-            continue
-        s = float(r['spread_size'])
-        sums[m][s]['ask_sum'] += float(r['ask_quote_depth'] or 0)
-        sums[m][s]['bid_sum'] += float(r['bid_quote_depth'] or 0)
-        sums[m][s]['count'] += 1
+    res = requests.post(
+        f'{METABASE_URL}/api/dataset',
+        headers={'X-Metabase-Session': token, 'Content-Type': 'application/json'},
+        json=payload
+    )
+    if res.status_code != 202:
+        raise Exception(f'Depths query failed: {res.status_code} {res.text[:500]}')
+    rows = res.json()['data']['rows']
+    print(f'Depths aggregated rows: {len(rows)}')
 
     result = {}
-    for m, spreads in sums.items():
-        result[m] = {}
-        for s, v in spreads.items():
-            n = v['count'] or 1
-            result[m][s] = {'ask': v['ask_sum'] / n, 'bid': v['bid_sum'] / n}
+    for market_id, spread_size, avg_ask, avg_bid in rows:
+        name = markets_map.get(int(market_id))
+        if not name:
+            continue
+        key = SPREAD_SIZE_TO_KEY.get(round(float(spread_size), 2))
+        if key is None:
+            continue
+        result.setdefault(name, {})[key] = {
+            'ask': float(avg_ask or 0),
+            'bid': float(avg_bid or 0),
+        }
     return result
 
 
@@ -190,11 +210,13 @@ def cap_pct(pct):
 
 
 def fmt(pct):
+    if pct is None:
+        return '`n/a`'
     emoji = '✅' if pct >= 100 else '❌'
     return f'{emoji} `{pct}%`'
 
 
-def compute_individual(partner_data, exchange_data, coin):
+def compute_individual(total_data, exchange_data, coin):
     matched_key = None
     for m in exchange_data.keys():
         clean = m.upper().replace('-', '').replace('/', '').replace('_', '')
@@ -203,40 +225,45 @@ def compute_individual(partner_data, exchange_data, coin):
             break
 
     result = {}
-    for spread in [0.30, 0.15]:
+    for spread in [0.0030, 0.0015]:
         ask_key, bid_key = SPREAD_MAP[spread]
-        ex = exchange_data.get(matched_key, {}) if matched_key else {}
-        p_vals = partner_data.get(matched_key, {}).get(spread, None) if matched_key else None
-        ex_ask = ex.get(ask_key, 0)
-        ex_bid = ex.get(bid_key, 0)
+        if not matched_key or matched_key not in total_data:
+            # No depths data in the window -> market wouldn't appear on the dashboard either
+            result[(spread, 'ask')] = None
+            result[(spread, 'bid')] = None
+            continue
+        ex = exchange_data[matched_key]
+        p_vals = total_data[matched_key].get(spread)
         if p_vals is None:
-            result[(spread, 'ask')] = 0.0
-            result[(spread, 'bid')] = 0.0
+            # mirrors the dashboard's COALESCE(..., 100)
+            result[(spread, 'ask')] = 100.0
+            result[(spread, 'bid')] = 100.0
         else:
-            result[(spread, 'ask')] = compute_pct(p_vals['ask'], ex_ask)
-            result[(spread, 'bid')] = compute_pct(p_vals['bid'], ex_bid)
+            result[(spread, 'ask')] = compute_pct(p_vals['ask'], ex[ask_key])
+            result[(spread, 'bid')] = compute_pct(p_vals['bid'], ex[bid_key])
     return result
 
 
-def compute_other_avgs(partner_data, exchange_data):
+def compute_other_avgs(total_data, exchange_data):
     sums = {
-        (0.30, 'ask'): [], (0.30, 'bid'): [],
-        (0.15, 'ask'): [], (0.15, 'bid'): [],
+        (0.0030, 'ask'): [], (0.0030, 'bid'): [],
+        (0.0015, 'ask'): [], (0.0015, 'bid'): [],
     }
     for market, ex in exchange_data.items():
         if get_group(market) != 'other':
             continue
-        for spread in [0.30, 0.15]:
+        if market not in total_data:
+            continue  # mirrors the dashboard's inner join
+        for spread in [0.0030, 0.0015]:
             ask_key, bid_key = SPREAD_MAP[spread]
-            p_vals = partner_data.get(market, {}).get(spread, None)
-            ex_ask = ex[ask_key]
-            ex_bid = ex[bid_key]
+            p_vals = total_data[market].get(spread)
             if p_vals is None:
-                sums[(spread, 'ask')].append(0.0)
-                sums[(spread, 'bid')].append(0.0)
+                ask_pct = bid_pct = 100.0  # mirrors COALESCE(..., 100)
             else:
-                sums[(spread, 'ask')].append(cap_pct(compute_pct(p_vals['ask'], ex_ask)))
-                sums[(spread, 'bid')].append(cap_pct(compute_pct(p_vals['bid'], ex_bid)))
+                ask_pct = compute_pct(p_vals['ask'], ex[ask_key])
+                bid_pct = compute_pct(p_vals['bid'], ex[bid_key])
+            sums[(spread, 'ask')].append(cap_pct(ask_pct))
+            sums[(spread, 'bid')].append(cap_pct(bid_pct))
 
     result = {}
     for key, vals in sums.items():
@@ -246,9 +273,9 @@ def compute_other_avgs(partner_data, exchange_data):
 
 def format_coin_block(name, data):
     lines = [f'*{name}*']
-    for spread, label in [(0.30, '30bps'), (0.15, '15bps')]:
-        ask = data.get((spread, 'ask'), 0.0)
-        bid = data.get((spread, 'bid'), 0.0)
+    for spread, label in [(0.0030, '30bps'), (0.0015, '15bps')]:
+        ask = data.get((spread, 'ask'))
+        bid = data.get((spread, 'bid'))
         lines.append(f'  {label} ask: {fmt(ask)}  bid: {fmt(bid)}')
     return '\n'.join(lines)
 
@@ -260,25 +287,27 @@ def send_telegram(message):
 
 def main():
     token = get_metabase_token()
+    markets_map = fetch_markets_map(token)
 
-    lines = ['📊 *Daily Liquidity Report — Alber Blanc*\n']
+    lines = ['📊 *Daily Liquidity Report — Alber Blanc*',
+             '_(numerator: total Extended market liquidity)_\n']
 
     for label, period, hours in [('1H', '1H', 1), ('12H', '12H', 12)]:
         ex_data = fetch_exchange_data(token, period)
-        p_data = fetch_partner_data(token, hours)
+        total_data = fetch_total_liquidity(token, hours, markets_map)
 
         lines.append(f'*── {label} ──*\n')
 
         for coin in INDIVIDUAL_COINS:
-            ind = compute_individual(p_data, ex_data, coin)
+            ind = compute_individual(total_data, ex_data, coin)
             lines.append(format_coin_block(coin, ind))
             lines.append('')
 
-        other = compute_other_avgs(p_data, ex_data)
+        other = compute_other_avgs(total_data, ex_data)
         lines.append(format_coin_block('Other (avg, capped at 300%)', other))
         lines.append('')
 
-    lines.append('→ Link to [Dashboards](https://x10.metabaseapp.com/public/dashboard/9f5dc6ed-2492-4a8a-a06b-0a4129da7144?tab=232-1-hour)')
+    lines.append('[Dashboards link](https://x10.metabaseapp.com/public/dashboard/9f5dc6ed-2492-4a8a-a06b-0a4129da7144?tab=232-1-hour)')
     send_telegram('\n'.join(lines))
 
 
